@@ -1,0 +1,175 @@
+/***** CONFIGURATION SECTION *****/
+
+/* mainTableID is ID of fusion table that contains IDs of fusion tables of all institutions */
+var mainTableID = "1GVXyJu4M_PhHkouLGEMaKzxECGNI_ZBABlhpev4";
+/* mapsSpreadsheetID is id of spreadsheet, where will be saved information from maps fusion tables */
+var mapsSpreadsheetID = "0AvjzqgGcOABYdHNhVzRSWlNYaTRjTFhObC0zNXFVaHc";
+/* versionsSpreadsheetID is id of spreadsheet, where will be saved information from versions fusion tables */
+var versionsSpreadsheetID = "0AvjzqgGcOABYdFQzc1hKd05IeU80S2QzNXZYWnBqbWc";
+
+/***** END OF CONFIGURATION SECTION *****/
+
+
+//main function
+function masterSpreadsheet() { 
+  var allTables = getInstitutionTables(mainTableID);
+  for(var tableType = 0; tableType < 2; tableType++){//script runs twice, first time for maps table and then for versions
+    var ss; //spreadsheet
+    var tableList;//IDs of all fusion tables of requested type (maps/versions)
+    if(tableType == 0){
+      ss = SpreadsheetApp.openById(mapsSpreadsheetID);//open right spreadsheet 
+      tableList = allTables['maps'];
+    }
+    else {
+      ss = SpreadsheetApp.openById(versionsSpreadsheetID);
+      tableList = allTables['versions'];
+    }
+    ss.setActiveSheet(ss.getSheets()[0]); //set first sheet as active sheet
+    var sheet = ss.getActiveSheet().clear(); //clear and return active sheet 
+    var strow = 1; //set field A1 as position where will start writing
+    var stcolumn = 1;
+    for (var i = 0; i < tableList.length; ++i) {
+      var chunkTotal = countChunks(tableList[i]);//split queried tables to chunks because of 1MB limit for inserting CSV
+      for (var chunk = 0; chunk < chunkTotal; chunk += 1000){
+        var responseCsv = selectData(tableList[i], chunk, tableType); //query date from fusion table
+        var resParse = CSVParse(responseCsv.getContentText()); //parse data
+        var length = resParse.length; //get number of rows
+        resParse.splice(length - 1, 1); //takes off last row which, is blank
+        length--; //redefine the length to fit the modified array
+        if (i>0 || chunk > 0){
+          resParse.splice(0, 1); //if this is NOT the first chunk of the first table, the first row, which contains header is removed
+          length--; //length is redefined to fit modified array
+        }
+        var width = resParse[0].length; //gets the number of columns in the array
+        var range = sheet.getRange(strow, stcolumn, length, width); //extract the range where data will be placed.
+        range.setValues(resParse); //sets the range to equal the array this is the same as doing a for loop with offsets and setting each cell to each value but significantly faster
+        strow = strow + length; //sets a new starting row so the data doesnt over write itself
+        SpreadsheetApp.flush();//write data to spreadsheet -> because of 1MB limit for insertion
+      } 
+    }
+  }
+}
+
+//Get IDs of all tables
+function getInstitutionTables(mainTableID){
+  var query = encodeURIComponent("SELECT maps_table, versions_table FROM ") + mainTableID;
+  var URL = "https://www.googleapis.com/fusiontables/v1/query?sql=" + query+"&key=AIzaSyCYoBozMLI7Uk-cmOLpYLFbamTv95GYksc&alt=csv";
+  var muteExceptions = true;
+  var response = UrlFetchApp.fetch(URL, { method: "get", muteHttpExceptions: muteExceptions });
+  var attemptCounter = 1;
+  //query fusion table until successful response code recieved (but max 10x)
+  while(response.getResponseCode() != 200){
+    if(attemptCounter >9){
+      muteExceptions = false;
+    }
+    response = UrlFetchApp.fetch(URL, { method: "get", muteHttpExceptions: muteExceptions });
+    attemptCounter++;
+  }
+  var responseCsv = CSVParse(response.getContentText());
+  var length = responseCsv.length;
+  var mapsTables = [];
+  var versionsTables = [];
+  for (var i = 1; i < length - 1; i++){//ignore first and last row of results (first - column names, last - blank)
+    mapsTables[i-1] = responseCsv[i][0];
+    versionsTables[i-1] = responseCsv[i][1];
+  }
+  var unitedTables = { "maps": mapsTables, "versions": versionsTables };
+  return unitedTables;
+}
+
+//Get amount of rows of given table
+function countChunks(tableID){
+  var query = encodeURIComponent("SELECT count(id) FROM ") + tableID;
+  var URL = "https://www.googleapis.com/fusiontables/v1/query?sql=" + query+"&key=AIzaSyCYoBozMLI7Uk-cmOLpYLFbamTv95GYksc&alt=csv";
+  var muteExceptions = true;
+  var response = UrlFetchApp.fetch(URL, { method: "get", muteHttpExceptions: muteExceptions });
+  var attemptCounter = 1;
+  while(response.getResponseCode() != 200){
+    if(attemptCounter >9){
+      muteExceptions = false;
+    }
+    response = UrlFetchApp.fetch(URL, { method: "get", muteHttpExceptions: muteExceptions });
+    attemptCounter++;
+  }
+  var responseCsv = CSVParse(response.getContentText());
+  return Number(responseCsv[1][0]);
+}
+
+//Select data from Table
+function selectData(tableID, chunk, tableType) {
+  var queryLimit = encodeURIComponent(" LIMIT 1000"); //get max 1k rows for 1 query -> should be less then 1MB of data
+  if(chunk > 0){
+    queryLimit = encodeURIComponent(" OFFSET ") + chunk + queryLimit; //if not first chunk, skips number of rows equal to chunk
+  }
+  var query = tableID + queryLimit;
+  if(tableType == 0){
+    query = encodeURIComponent("SELECT user_name, user_identity, status, date_time FROM ") + query;
+  }
+  else {
+    query = encodeURIComponent("SELECT user_name, user_identity, gcps_diff, date_time FROM ") + query
+  }
+  var URL = "https://www.googleapis.com/fusiontables/v1/query?sql=" + query+"&key=AIzaSyCYoBozMLI7Uk-cmOLpYLFbamTv95GYksc&alt=csv"; //combines the prepend to the query
+  
+  
+  //this gets the return value from the google server it contains unparsed CSV in body
+  var muteExceptions = true;
+  var response = UrlFetchApp.fetch(URL, { method: "get", muteHttpExceptions: muteExceptions });
+  var attemptCounter = 1;
+  while(response.getResponseCode() != 200){
+    if(attemptCounter >9){
+      muteExceptions = false;
+    }
+    response = UrlFetchApp.fetch(URL, { method: "get", muteHttpExceptions: muteExceptions });
+    attemptCounter++;
+  }
+  return response; //send the unparsed CSV back
+}
+
+//Parse the CSV File
+function CSVParse(strData, strDelimiter){
+  // Check to see if the delimiter is defined. If not,
+  // then default to comma.
+  strDelimiter = (strDelimiter || ",");
+
+  // Create a regular expression to parse the CSV values.
+  var objPattern = new RegExp(
+    (
+      // Delimiters.
+      "(\\" + strDelimiter + "|\\r?\\n|\\r|^)" +
+
+      // Quoted fields.
+      "(?:\"([^\"]*(?:\"\"[^\"]*)*)\"|" +
+
+      // Standard fields.
+      "([^\"\\" + strDelimiter + "\\r\\n]*))"
+    ),
+    "gi"
+  );
+
+  var arrData = [[]]; //creates array where data will be stored
+  var arrMatches = null; //creates a variable to store the matches
+  //this parses through the information and figures out when to break them into a new piece in the array based on the delimiter created above
+  while (arrMatches = objPattern.exec( strData )){
+    var strMatchedDelimiter = arrMatches[ 1 ];
+    if (
+      strMatchedDelimiter.length &&
+      (strMatchedDelimiter != strDelimiter)
+    ){
+      arrData.push( [] );
+    }
+
+    if (arrMatches[ 2 ]){
+      var strMatchedValue = arrMatches[ 2 ].replace(
+        new RegExp( "\"\"", "g" ),
+        "\""
+      );
+
+    } else {
+      var strMatchedValue = arrMatches[ 3 ];
+    }
+    arrData[ arrData.length - 1 ].push( strMatchedValue );
+  }
+
+  // Return the parsed data.
+  return( arrData );
+}
